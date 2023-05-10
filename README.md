@@ -6,7 +6,7 @@ This is a high perofrmance ip-based net packet blocker leveraging XDP in Linux.
 
 This repository depends on *libbpf*, *llvm*, *clang* and *libelf*. Before statring, you need to have them in your machine.
 
-[libbpf](https://github.com/libbpf/libbpf/) is (to be) included as a git submodule. After cloning this repository, please run the command
+[libbpf](https://github.com/libbpf/libbpf/) is included as a git submodule. After cloning this repository, please run the command
 ```shell
 git submodule update --init
 ```
