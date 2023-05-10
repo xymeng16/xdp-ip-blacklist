@@ -9,6 +9,7 @@
 #include <uapi/linux/if_packet.h>
 #include <uapi/linux/if_vlan.h>
 #include <uapi/linux/ip.h>
+#include <uapi/linux/ipv6.h>
 #include <uapi/linux/in.h>
 #include <uapi/linux/tcp.h>
 #include <uapi/linux/udp.h>
@@ -159,7 +160,7 @@ static __always_inline u32 parse_port(struct xdp_md *ctx, u8 proto, void *hdr)
 		fproto = DDOS_FILTER_TCP;
 		break;
 	case IPPROTO_ICMP:
-		return XDP_DROP;
+		return XDP_PASS;
 	default:
 		return XDP_PASS;
 	}
@@ -246,25 +247,20 @@ static int parse_ipv6(struct xdp_md *ctx, u64 l3_offset)
 	nexthdr = ip6h->nexthdr;
 
 	if (nexthdr == IPPROTO_IPIP) {
-		iph = data + nh_off + ihl_len;
+		iph = data + l3_offset + ihl_len;
 		if (iph + 1 > data_end)
 			return 0;
 		ihl_len += iph->ihl * 4;
 		nexthdr = iph->protocol;
 	} else if (nexthdr == IPPROTO_IPV6) {
-		ip6h = data + nh_off + ihl_len;
+		ip6h = data + l3_offset + ihl_len;
 		if (ip6h + 1 > data_end)
 			return 0;
 		ihl_len += sizeof(struct ipv6hdr);
 		nexthdr = ip6h->nexthdr;
 	}
 
-	if (nexthdr == IPPROTO_TCP)
-		return tcp(data, nh_off + ihl_len, data_end);
-	else if (nexthdr == IPPROTO_UDP)
-		return udp(data, nh_off + ihl_len, data_end);
     return parse_port(ctx, iph->protocol, iph + 1);
-	return 0;
 }
 
 static __always_inline u32 handle_eth_protocol(struct xdp_md *ctx,
@@ -275,7 +271,7 @@ static __always_inline u32 handle_eth_protocol(struct xdp_md *ctx,
 		return parse_ipv4(ctx, l3_offset);
 		break;
 	case ETH_P_IPV6: /* Not handler for IPv6 yet*/
-        return XDP_DROP;
+        return parse_ipv6(ctx, l3_offset);
 	case ETH_P_ARP:	 /* Let OS handle ARP */
 			 /* Fall-through */
 	default:
