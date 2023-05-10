@@ -1,4 +1,4 @@
-module xdp-ip-blocker
+module github.com/xymeng16/xdp-ip-blocker
 
 go 1.20
 
