@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"unsafe"
 
 	bpf "github.com/iovisor/gobpf/bcc"
 )
@@ -24,6 +25,11 @@ import (
 void perf_reader_free(void *ptr);
 */
 import "C"
+
+type ipv4_lpm_key struct {
+	prefixlen uint32
+	addr      uint32
+}
 
 //go:embed xdp_ddos.c
 var source string
@@ -109,5 +115,6 @@ func main() {
 
 	cfg = verdict_cnt.Config()
 	fmt.Printf("name: %s, fd: %d\n", cfg["name"], cfg["fd"])
-
+	var asByteSlice []byte = (*(*[16]byte)(unsafe.Pointer(&ipv4_lpm_key{prefixlen: 24, addr: 0x0a0b0101})))[:]
+	blacklist.Set(asByteSlice, []byte{0x01})
 }

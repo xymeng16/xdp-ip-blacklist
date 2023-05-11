@@ -26,8 +26,13 @@ struct vlan_hdr {
 	__be16 h_vlan_encapsulated_proto;
 };
 
+struct ipv4_lpm_key {
+        __u32 prefixlen;
+        __u32 data;
+};
+
 #define XDP_ACTION_MAX (XDP_TX + 1)
-BPF_PERCPU_HASH(blacklist, u32, u64, 100000);
+BPF_LPM_TRIE(blacklist, struct ipv4_lpm_key, u32, 100000);
 BPF_TABLE("percpu_array", u32, long, verdict_cnt, XDP_ACTION_MAX);
 BPF_TABLE("percpu_array", u32, u32, port_blacklist, 65536);
 BPF_TABLE("percpu_array", u32, u64, port_blacklist_drop_count_tcp, 65536);
@@ -171,8 +176,6 @@ static __always_inline u32 parse_port(struct xdp_md *ctx, u8 proto, void *hdr)
 
 	if (value) {
 		if (*value & (1 << fproto)) {
-			// struct bpf_map_def *drop_counter =
-			// drop_count_by_fproto(fproto);
 			switch (fproto) {
 			case DDOS_FILTER_UDP: {
 				drops = port_blacklist_drop_count_udp.lookup(
@@ -190,12 +193,19 @@ static __always_inline u32 parse_port(struct xdp_md *ctx, u8 proto, void *hdr)
 							matches */
 					return XDP_DROP;
 				}
-                break;
-			} 
+				break;
+			}
 			}
 		}
 	}
 	return XDP_PASS;
+}
+
+static __always_inline int ipv4_match(__be32 addr, __be32 net, u8 prefixlen)
+{
+	if (prefixlen == 0)
+		return 1;
+	return !((addr ^ net) & htonl(~0UL << (32 - prefixlen)));
 }
 
 static __always_inline u32 parse_ipv4(struct xdp_md *ctx, u64 l3_offset)
@@ -218,19 +228,24 @@ static __always_inline u32 parse_ipv4(struct xdp_md *ctx, u64 l3_offset)
 	bpf_debug("Valid IPv4 packet: raw saddr:0x%x\n", ip_src);
 
 	// value = bpf_map_lookup_elem(&blacklist, &ip_src);
-	value = blacklist.lookup(&ip_src);
+	struct ipv4_lpm_key key = {
+                .prefixlen = 32,
+                .data = ip_src
+        };
+	value = blacklist.lookup(&key);
 	if (value) {
 		/* Don't need __sync_fetch_and_add(); as percpu map */
 		*value += 1; /* Keep a counter for drop matches */
 		return XDP_DROP;
 	}
 
-	return parse_port(ctx, iph->protocol, iph + 1);
+	// return parse_port(ctx, iph->protocol, iph + 1);
+	return XDP_PASS;
 }
 
-static int parse_ipv6(struct xdp_md *ctx, u64 l3_offset)
+static __always_inline int parse_ipv6(struct xdp_md *ctx, u64 l3_offset)
 {
-    void *data_end = (void *)(long)ctx->data_end;
+	void *data_end = (void *)(long)ctx->data_end;
 	void *data = (void *)(long)ctx->data;
 	struct ipv6hdr *ip6h;
 	struct iphdr *iph;
@@ -238,11 +253,10 @@ static int parse_ipv6(struct xdp_md *ctx, u64 l3_offset)
 	uint64_t nexthdr;
 
 	ip6h = data + l3_offset;
-	if (ip6h + 1 > data_end)
-    {
-        bpf_debug("Invalid IPv4 packet: L3off:%llu\n", l3_offset);
-        return XDP_ABORTED;
-    }
+	if (ip6h + 1 > data_end) {
+		bpf_debug("Invalid IPv6 packet: L3off:%llu\n", l3_offset);
+		return XDP_ABORTED;
+	}
 
 	nexthdr = ip6h->nexthdr;
 
@@ -260,7 +274,8 @@ static int parse_ipv6(struct xdp_md *ctx, u64 l3_offset)
 		nexthdr = ip6h->nexthdr;
 	}
 
-    return parse_port(ctx, iph->protocol, iph + 1);
+	// return parse_port(ctx, iph->protocol, iph + 1);
+	return XDP_PASS;
 }
 
 static __always_inline u32 handle_eth_protocol(struct xdp_md *ctx,
@@ -271,9 +286,9 @@ static __always_inline u32 handle_eth_protocol(struct xdp_md *ctx,
 		return parse_ipv4(ctx, l3_offset);
 		break;
 	case ETH_P_IPV6: /* Not handler for IPv6 yet*/
-        return parse_ipv6(ctx, l3_offset);
-	case ETH_P_ARP:	 /* Let OS handle ARP */
-			 /* Fall-through */
+		return parse_ipv6(ctx, l3_offset);
+	case ETH_P_ARP: /* Let OS handle ARP */
+			/* Fall-through */
 	default:
 		bpf_debug("Not handling eth_proto:0x%x\n", eth_proto);
 		return XDP_PASS;

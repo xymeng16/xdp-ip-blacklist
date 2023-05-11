@@ -219,7 +219,7 @@ setup()
 
     echo "Setting up new environment '$NS'"
 
-    [ -e "$STATEFILE" ] && die "Environment for '$NS' already exists"
+    [ -e "$STATEFILE" ] && (echo $STATEFILE; die "Environment for '$NS' already exists")
 
     local NUM=$(get_num "$NS")
     local PEERNAME="testl-ve-$NUM"
