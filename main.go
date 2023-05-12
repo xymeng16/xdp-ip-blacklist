@@ -8,6 +8,7 @@
 package main
 
 import (
+	"bufio"
 	_ "embed"
 	"fmt"
 	"os"
@@ -33,6 +34,33 @@ type ipv4_lpm_key struct {
 
 //go:embed xdp_ddos.c
 var source string
+
+func loadWhitelist(path string) []ipv4_lpm_key {
+	whiltelist := []ipv4_lpm_key{}
+	// open file
+	file, err := os.Open(path)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	defer file.Close()
+
+	// read each line of the file, and append it to the whitelist
+	// each line has format 1.2.3.4/24
+	scanner := bufio.NewScanner(file)
+	scanner.Split(bufio.ScanLines)
+	for scanner.Scan() {
+		var prefixlen uint32
+		var addr [4]uint32
+		fmt.Sscanf(scanner.Text(), "%d.%d.%d.%d/%d", &addr[0], &addr[1], &addr[2], &addr[3], &prefixlen)
+		var ip uint32
+		// convert from ip string to uint32
+		ip = addr[3]<<24 | addr[2]<<16 | addr[1]<<8 | addr[0]
+		// fmt.Printf("cidr: 0x%08x/%d\n", ip, prefixlen)
+		whiltelist = append(whiltelist, ipv4_lpm_key{prefixlen: prefixlen, addr: ip})
+	}
+	return whiltelist
+}
 
 func usage() {
 	fmt.Printf("Usage: %v <ifdev>\n", os.Args[0])
@@ -83,12 +111,24 @@ func main() {
 	signal.Notify(sig, os.Interrupt, os.Kill)
 
 	// dropcnt := bpf.NewTable(module.TableId("dropcnt"), module)
-	blacklist := bpf.NewTable(module.TableId("blacklist"), module)
+	blacklist := bpf.NewTable(module.TableId("whitelist"), module)
 	port_blacklist := bpf.NewTable(module.TableId("port_blacklist"), module)
 	port_blacklist_drop_count_tcp := bpf.NewTable(module.TableId("port_blacklist_drop_count_tcp"), module)
 	port_blacklist_drop_count_udp := bpf.NewTable(module.TableId("port_blacklist_drop_count_udp"), module)
 	verdict_cnt := bpf.NewTable(module.TableId("verdict_cnt"), module)
 
+	var asByteSlice []byte
+	var value uint32 = 0x00
+	// load whitelist
+	whitelist := loadWhitelist("whitelist.txt")
+	for _, v := range whitelist {
+		asByteSlice = (*(*[16]byte)(unsafe.Pointer(&ipv4_lpm_key{prefixlen: v.prefixlen, addr: v.addr})))[:]
+		blacklist.Set(asByteSlice, (*(*[4]byte)(unsafe.Pointer(&value)))[:])
+		value += 1
+	}
+	fmt.Println("values", value)
+	asByteSlice = (*(*[16]byte)(unsafe.Pointer(&ipv4_lpm_key{prefixlen: 24, addr: 0x01010b0a})))[:]
+	blacklist.Set(asByteSlice, (*(*[4]byte)(unsafe.Pointer(&value)))[:])
 	<-sig
 
 	// fmt.Printf("\n{IP protocol-number}: {total dropped pkts}\n")
@@ -115,6 +155,4 @@ func main() {
 
 	cfg = verdict_cnt.Config()
 	fmt.Printf("name: %s, fd: %d\n", cfg["name"], cfg["fd"])
-	var asByteSlice []byte = (*(*[16]byte)(unsafe.Pointer(&ipv4_lpm_key{prefixlen: 24, addr: 0x0a0b0101})))[:]
-	blacklist.Set(asByteSlice, []byte{0x01})
 }

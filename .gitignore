@@ -67,3 +67,4 @@ trace_read
 xdp_sample_pkts_user
 
 .vscode/
+.idea/

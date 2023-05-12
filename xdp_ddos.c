@@ -27,18 +27,18 @@ struct vlan_hdr {
 };
 
 struct ipv4_lpm_key {
-        __u32 prefixlen;
-        __u32 data;
+	__u32 prefixlen;
+	__u32 data;
 };
 
 #define XDP_ACTION_MAX (XDP_TX + 1)
-BPF_LPM_TRIE(blacklist, struct ipv4_lpm_key, u32, 100000);
+BPF_LPM_TRIE(whitelist, struct ipv4_lpm_key, u32, 100000);
 BPF_TABLE("percpu_array", u32, long, verdict_cnt, XDP_ACTION_MAX);
 BPF_TABLE("percpu_array", u32, u32, port_blacklist, 65536);
 BPF_TABLE("percpu_array", u32, u64, port_blacklist_drop_count_tcp, 65536);
 BPF_TABLE("percpu_array", u32, u64, port_blacklist_drop_count_udp, 65536);
 
-static inline struct bpf_map_def *drop_count_by_fproto(int fproto)
+static __always_inline struct bpf_map_def *drop_count_by_fproto(int fproto)
 {
 
 	switch (fproto) {
@@ -54,16 +54,15 @@ static inline struct bpf_map_def *drop_count_by_fproto(int fproto)
 
 // TODO: Add map for controlling behavior
 
-// #define DEBUG 1
+#define DEBUG 1
 #ifdef DEBUG
 /* Only use this for debug output. Notice output from bpf_trace_printk()
  * end-up in /sys/kernel/debug/tracing/trace_pipe
  */
 #define bpf_debug(fmt, ...)                                                    \
-	({                                                                     \
-		char ____fmt[] = fmt;                                          \
-		bpf_trace_printk(____fmt, sizeof(____fmt), ##__VA_ARGS__);     \
-	})
+	{                                                                      \
+	}                                                                      \
+	while (0)
 #else
 #define bpf_debug(fmt, ...)                                                    \
 	{                                                                      \
@@ -208,34 +207,34 @@ static __always_inline int ipv4_match(__be32 addr, __be32 net, u8 prefixlen)
 	return !((addr ^ net) & htonl(~0UL << (32 - prefixlen)));
 }
 
+#define fmt_valid_str "Valid IPv4 packet: raw saddr:0x%x\n"
+#define fmt_blocked_str "IPv4 packet not in the whitelist: raw saddr:0x%x, value: %d\n"
+
 static __always_inline u32 parse_ipv4(struct xdp_md *ctx, u64 l3_offset)
 {
 	void *data_end = (void *)(long)ctx->data_end;
 	void *data = (void *)(long)ctx->data;
 	struct iphdr *iph = data + l3_offset;
-	u64 *value;
+	u32 *value, v2;
 	u32 ip_src; /* type need to match map */
 
 	/* Hint: +1 is sizeof(struct iphdr) */
 	if (iph + 1 > data_end) {
-		bpf_debug("Invalid IPv4 packet: L3off:%llu\n", l3_offset);
 		return XDP_ABORTED;
 	}
 	/* Extract key */
 	ip_src = iph->saddr;
-	// ip_src = ntohl(ip_src); // ntohl does not work for some reason!?!
 
-	bpf_debug("Valid IPv4 packet: raw saddr:0x%x\n", ip_src);
-
+#ifdef DEBUG
+	bpf_trace_printk(fmt_valid_str, ip_src);
+#endif
 	// value = bpf_map_lookup_elem(&blacklist, &ip_src);
-	struct ipv4_lpm_key key = {
-                .prefixlen = 32,
-                .data = ip_src
-        };
-	value = blacklist.lookup(&key);
-	if (value) {
-		/* Don't need __sync_fetch_and_add(); as percpu map */
-		*value += 1; /* Keep a counter for drop matches */
+	struct ipv4_lpm_key key = {.prefixlen = 32, .data = ip_src};
+	value = whitelist.lookup(&key);
+	if (value == NULL) { // not in the whitelist
+    #ifdef DEBUG
+		bpf_trace_printk(fmt_blocked_str, ip_src, *value);
+#endif
 		return XDP_DROP;
 	}
 
