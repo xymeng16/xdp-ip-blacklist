@@ -127,8 +127,15 @@ func main() {
 		value += 1
 	}
 	fmt.Println("values", value)
+
 	asByteSlice = (*(*[16]byte)(unsafe.Pointer(&ipv4_lpm_key{prefixlen: 24, addr: 0x01010b0a})))[:]
 	blacklist.Set(asByteSlice, (*(*[4]byte)(unsafe.Pointer(&value)))[:])
+	value += 1
+
+	asByteSlice = (*(*[16]byte)(unsafe.Pointer(&ipv4_lpm_key{prefixlen: 24, addr: 0x0000000a})))[:]
+	blacklist.Set(asByteSlice, (*(*[4]byte)(unsafe.Pointer(&value)))[:])
+	value += 1
+
 	<-sig
 
 	// fmt.Printf("\n{IP protocol-number}: {total dropped pkts}\n")

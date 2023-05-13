@@ -54,7 +54,7 @@ static __always_inline struct bpf_map_def *drop_count_by_fproto(int fproto)
 
 // TODO: Add map for controlling behavior
 
-#define DEBUG 1
+// #define DEBUG 1
 #ifdef DEBUG
 /* Only use this for debug output. Notice output from bpf_trace_printk()
  * end-up in /sys/kernel/debug/tracing/trace_pipe
@@ -99,7 +99,6 @@ static __always_inline bool parse_eth(struct ethhdr *eth, void *data_end,
 		return false;
 
 	eth_type = eth->h_proto;
-	bpf_debug("Debug: eth_type:0x%x\n", ntohs(eth_type));
 
 	/* Skip non 802.3 Ethertypes */
 	if (unlikely(ntohs(eth_type) < ETH_P_802_3_MIN))
@@ -146,8 +145,6 @@ static __always_inline u32 parse_port(struct xdp_md *ctx, u8 proto, void *hdr)
 	case IPPROTO_UDP:
 		udph = hdr;
 		if (udph + 1 > data_end) {
-			bpf_debug("Invalid UDPv4 packet: L4off:%llu\n",
-				  sizeof(struct iphdr) + sizeof(struct udphdr));
 			return XDP_ABORTED;
 		}
 		dport = ntohs(udph->dest);
@@ -156,8 +153,6 @@ static __always_inline u32 parse_port(struct xdp_md *ctx, u8 proto, void *hdr)
 	case IPPROTO_TCP:
 		tcph = hdr;
 		if (tcph + 1 > data_end) {
-			bpf_debug("Invalid TCPv4 packet: L4off:%llu\n",
-				  sizeof(struct iphdr) + sizeof(struct tcphdr));
 			return XDP_ABORTED;
 		}
 		dport = ntohs(tcph->dest);
@@ -170,7 +165,6 @@ static __always_inline u32 parse_port(struct xdp_md *ctx, u8 proto, void *hdr)
 	}
 
 	dport_idx = dport;
-	// value = bpf_map_lookup_elem(&port_blacklist, &dport_idx);
 	value = port_blacklist.lookup(&dport_idx);
 
 	if (value) {
@@ -232,9 +226,7 @@ static __always_inline u32 parse_ipv4(struct xdp_md *ctx, u64 l3_offset)
 	struct ipv4_lpm_key key = {.prefixlen = 32, .data = ip_src};
 	value = whitelist.lookup(&key);
 	if (value == NULL) { // not in the whitelist
-    #ifdef DEBUG
 		bpf_trace_printk(fmt_blocked_str, ip_src, *value);
-#endif
 		return XDP_DROP;
 	}
 
@@ -253,7 +245,6 @@ static __always_inline int parse_ipv6(struct xdp_md *ctx, u64 l3_offset)
 
 	ip6h = data + l3_offset;
 	if (ip6h + 1 > data_end) {
-		bpf_debug("Invalid IPv6 packet: L3off:%llu\n", l3_offset);
 		return XDP_ABORTED;
 	}
 
@@ -285,11 +276,10 @@ static __always_inline u32 handle_eth_protocol(struct xdp_md *ctx,
 		return parse_ipv4(ctx, l3_offset);
 		break;
 	case ETH_P_IPV6: /* Not handler for IPv6 yet*/
-		return parse_ipv6(ctx, l3_offset);
+		return XDP_PASS;
 	case ETH_P_ARP: /* Let OS handle ARP */
 			/* Fall-through */
 	default:
-		bpf_debug("Not handling eth_proto:0x%x\n", eth_proto);
 		return XDP_PASS;
 	}
 	return XDP_PASS;
@@ -305,11 +295,8 @@ int xdp_ip_blocker(struct xdp_md *ctx)
 	u32 action;
 
 	if (!(parse_eth(eth, data_end, &eth_proto, &l3_offset))) {
-		bpf_debug("Cannot parse L2: L3off:%llu proto:0x%x\n", l3_offset,
-			  eth_proto);
 		return XDP_PASS; /* Skip */
 	}
-	bpf_debug("Reached L3: L3off:%llu proto:0x%x\n", l3_offset, eth_proto);
 
 	action = handle_eth_protocol(ctx, eth_proto, l3_offset);
 	stats_action_verdict(action);

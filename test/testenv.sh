@@ -101,7 +101,7 @@ ensure_nsname()
 
 get_num()
 {
-    local num=1
+    local num=0
     if [ -f "$STATEDIR/highest_num" ]; then
         num=$(( 1 + $(< "$STATEDIR/highest_num" )))
     fi
