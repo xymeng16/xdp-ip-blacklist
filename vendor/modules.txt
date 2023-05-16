@@ -4,3 +4,6 @@ github.com/iovisor/gobpf/bcc
 github.com/iovisor/gobpf/pkg/cpuonline
 github.com/iovisor/gobpf/pkg/cpupossible
 github.com/iovisor/gobpf/pkg/cpurange
+# github.com/tmthrgd/go-popcount v0.0.0-20190904054823-afb1ace8b04f
+## explicit
+github.com/tmthrgd/go-popcount

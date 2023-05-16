@@ -6,6 +6,7 @@
 #define KBUILD_MODNAME "foo"
 #include <uapi/linux/bpf.h>
 #include <uapi/linux/if_ether.h>
+#include <uapi/linux/in6.h>
 #include <uapi/linux/if_packet.h>
 #include <uapi/linux/if_vlan.h>
 #include <uapi/linux/ip.h>
@@ -33,20 +34,22 @@ struct ipv4_lpm_key {
 
 struct ipv6_lpm_key {
 	__u32 prefixlen;
-	__u8 data[16];
+    __u64 data[2]
 };
+
+#define DEBUG
 
 BPF_LPM_TRIE(ipv4_whitelist, struct ipv4_lpm_key, u32, 100000);
 BPF_LPM_TRIE(ipv6_whitelist, struct ipv6_lpm_key, u32, 100000);
 
-// BPF_TABLE_PINNED("percpu_hash", u64, u64, ipv4_blocked, 100000, "/sys/fs/bpf/ipv4_blocked");
-// BPF_TABLE_PINNED("percpu_hash", u64, u64, ipv6_blocked, 100000, "/sys/fs/bpf/ipv4_blocked");
+// BPF_TABLE_PINNED("percpu_hash", u64, u64, ipv4_blocked, 100000,
+// "/sys/fs/bpf/ipv4_blocked"); BPF_TABLE_PINNED("percpu_hash", u64, u64,
+// ipv6_blocked, 100000, "/sys/fs/bpf/ipv4_blocked");
 BPF_TABLE("percpu_hash", u32, u64, ipv4_blocked, 100000);
 BPF_TABLE("percpu_hash", struct in6_addr, u64, ipv6_blocked, 100000);
 
-
-#define fmt_valid_str "Valid IPv4 packet: saddr:0x%s\n"
-#define fmt_v4_blocked_str "IPv4 not in the whitelist: saddr:%d.%d.%d.%d\n"
+#define fmt_valid_str "Valid IPv4 packet: saddr:0x%x\n"
+#define fmt_v4_blocked_str "IPv4 not in the whitelist: saddr:0x%x\n"
 
 /* Parse Ethernet layer 2, extract network layer 3 offset and protocol
  *
@@ -107,7 +110,8 @@ static __always_inline u32 parse_port(struct xdp_md *ctx, u8 proto, void *hdr,
 	u32 fproto;
 	u64 zero = 0, *val;
 
-	if (proto == IPPROTO_TCP) {
+	switch (proto) {
+	case IPPROTO_TCP: {
 		tcph = hdr;
 		if (tcph + 1 > data_end) {
 			return XDP_ABORTED;
@@ -118,8 +122,24 @@ static __always_inline u32 parse_port(struct xdp_md *ctx, u8 proto, void *hdr,
 			if (val) {
 				*val += 1;
 			}
+			bpf_trace_printk(
+			    "IPv4 not in the whitelist: saddr:0x%x\n", ip_src);
 			return XDP_DROP;
 		}
+		break;
+	}
+#ifdef DEBUG
+	case IPPROTO_ICMP: {
+		bpf_trace_printk("Blocked ICMPv4 from 0x%x\n", ip_src);
+		val = ipv4_blocked.lookup_or_init(&ip_src, &zero);
+		if (val) {
+			*val += 1;
+            bpf_trace_printk("current value is %d\n", *val);
+		}
+		return XDP_DROP;
+		break;
+	}
+#endif
 	}
 
 	return XDP_PASS;
@@ -139,7 +159,9 @@ static __always_inline u32 parse_ipv4(struct xdp_md *ctx, u64 l3_offset)
 	}
 	/* Extract key */
 	ip_src = iph->saddr;
-
+#ifdef DEBUG
+	bpf_trace_printk("Valid IPv4 packet: saddr:0x%x\n", ip_src);
+#endif
 	struct ipv4_lpm_key key = {.prefixlen = 32, .data = ip_src};
 	value = ipv4_whitelist.lookup(&key);
 	if (value == NULL) { // not in the whitelist
@@ -159,12 +181,21 @@ static __always_inline int parse_ipv6(struct xdp_md *ctx, u64 l3_offset)
 	struct iphdr *iph;
 	uint64_t ihl_len = sizeof(struct ipv6hdr);
 	uint64_t nexthdr;
-
+    
 	ip6h = data + l3_offset;
 	if (ip6h + 1 > data_end) {
 		return XDP_ABORTED;
 	}
 
+#ifdef DEBUG
+    bpf_trace_printk("[1/2] Valid IPv6 packet from %08x %08x\n", ip6h->saddr.in6_u.u6_addr32[0], ip6h->saddr.in6_u.u6_addr32[1]);
+    bpf_trace_printk("[2/2] Valid IPv6 packet from %08x %08x\n", ip6h->saddr.in6_u.u6_addr32[2], ip6h->saddr.in6_u.u6_addr32[3]);
+#endif
+
+    // for (int i = 0; i < 16; i++) {
+    //     ip6_src[i] = ip6h->saddr.in6_u.u6_addr8[i];
+    // }
+    
 	nexthdr = ip6h->nexthdr;
 
 	if (nexthdr == IPPROTO_IPIP) {
@@ -193,7 +224,8 @@ static __always_inline u32 handle_eth_protocol(struct xdp_md *ctx,
 		return parse_ipv4(ctx, l3_offset);
 		break;
 	case ETH_P_IPV6: /* Not handler for IPv6 yet*/
-		return XDP_PASS;
+		return parse_ipv6(ctx, l3_offset);
+        break;
 	case ETH_P_ARP: /* Let OS handle ARP */
 			/* Fall-through */
 	default:
