@@ -32,10 +32,15 @@ type ipv4_lpm_key struct {
 	addr      uint32
 }
 
+type ipv6_lpm_key struct {
+	prefixlen uint32
+	addr      [16]uint8
+}
+
 //go:embed xdp_ddos.c
 var source string
 
-func loadWhitelist(path string) []ipv4_lpm_key {
+func loadIPV4Whitelist(path string) []ipv4_lpm_key {
 	whiltelist := []ipv4_lpm_key{}
 	// open file
 	file, err := os.Open(path)
@@ -111,17 +116,14 @@ func main() {
 	signal.Notify(sig, os.Interrupt, os.Kill)
 
 	// dropcnt := bpf.NewTable(module.TableId("dropcnt"), module)
-	blacklist := bpf.NewTable(module.TableId("whitelist"), module)
-	port_blacklist := bpf.NewTable(module.TableId("port_blacklist"), module)
-	port_blacklist_drop_count_tcp := bpf.NewTable(module.TableId("port_blacklist_drop_count_tcp"), module)
-	port_blacklist_drop_count_udp := bpf.NewTable(module.TableId("port_blacklist_drop_count_udp"), module)
-	verdict_cnt := bpf.NewTable(module.TableId("verdict_cnt"), module)
+	blacklist := bpf.NewTable(module.TableId("ipv4_whitelist"), module)
+	ipv4_blocked := bpf.NewTable(module.TableId("ipv4_blocked"), module)
 
 	var asByteSlice []byte
 	var value uint32 = 0x00
 	// load whitelist
-	whitelist := loadWhitelist("whitelist.txt")
-	for _, v := range whitelist {
+	ipv4_whitelist := loadIPV4Whitelist("whitelist.txt")
+	for _, v := range ipv4_whitelist {
 		asByteSlice = (*(*[16]byte)(unsafe.Pointer(&ipv4_lpm_key{prefixlen: v.prefixlen, addr: v.addr})))[:]
 		blacklist.Set(asByteSlice, (*(*[4]byte)(unsafe.Pointer(&value)))[:])
 		value += 1
@@ -151,15 +153,9 @@ func main() {
 	cfg := blacklist.Config()
 	fmt.Printf("name: %s, fd: %d\n", cfg["name"], cfg["fd"])
 
-	cfg = port_blacklist.Config()
-	fmt.Printf("name: %s, fd: %d\n", cfg["name"], cfg["fd"])
-
-	cfg = port_blacklist_drop_count_tcp.Config()
-	fmt.Printf("name: %s, fd: %d\n", cfg["name"], cfg["fd"])
-
-	cfg = port_blacklist_drop_count_udp.Config()
-	fmt.Printf("name: %s, fd: %d\n", cfg["name"], cfg["fd"])
-
-	cfg = verdict_cnt.Config()
-	fmt.Printf("name: %s, fd: %d\n", cfg["name"], cfg["fd"])
+	for it := ipv4_blocked.Iter(); it.Next(); {
+		key := it.Key()
+		value := bpf.GetHostByteOrder().Uint64(it.Leaf())
+		fmt.Printf("%d.%d.%d.%d: %d\n", key[0], key[1], key[2], key[3], value)
+	}
 }

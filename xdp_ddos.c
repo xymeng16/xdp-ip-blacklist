@@ -31,58 +31,22 @@ struct ipv4_lpm_key {
 	__u32 data;
 };
 
-#define XDP_ACTION_MAX (XDP_TX + 1)
-BPF_LPM_TRIE(whitelist, struct ipv4_lpm_key, u32, 100000);
-BPF_TABLE("percpu_array", u32, long, verdict_cnt, XDP_ACTION_MAX);
-BPF_TABLE("percpu_array", u32, u32, port_blacklist, 65536);
-BPF_TABLE("percpu_array", u32, u64, port_blacklist_drop_count_tcp, 65536);
-BPF_TABLE("percpu_array", u32, u64, port_blacklist_drop_count_udp, 65536);
+struct ipv6_lpm_key {
+	__u32 prefixlen;
+	__u8 data[16];
+};
 
-static __always_inline struct bpf_map_def *drop_count_by_fproto(int fproto)
-{
+BPF_LPM_TRIE(ipv4_whitelist, struct ipv4_lpm_key, u32, 100000);
+BPF_LPM_TRIE(ipv6_whitelist, struct ipv6_lpm_key, u32, 100000);
 
-	switch (fproto) {
-	case DDOS_FILTER_UDP:
-		return &port_blacklist_drop_count_udp;
-		break;
-	case DDOS_FILTER_TCP:
-		return &port_blacklist_drop_count_tcp;
-		break;
-	}
-	return NULL;
-}
+// BPF_TABLE_PINNED("percpu_hash", u64, u64, ipv4_blocked, 100000, "/sys/fs/bpf/ipv4_blocked");
+// BPF_TABLE_PINNED("percpu_hash", u64, u64, ipv6_blocked, 100000, "/sys/fs/bpf/ipv4_blocked");
+BPF_TABLE("percpu_hash", u32, u64, ipv4_blocked, 100000);
+BPF_TABLE("percpu_hash", struct in6_addr, u64, ipv6_blocked, 100000);
 
-// TODO: Add map for controlling behavior
 
-// #define DEBUG 1
-#ifdef DEBUG
-/* Only use this for debug output. Notice output from bpf_trace_printk()
- * end-up in /sys/kernel/debug/tracing/trace_pipe
- */
-#define bpf_debug(fmt, ...)                                                    \
-	{                                                                      \
-	}                                                                      \
-	while (0)
-#else
-#define bpf_debug(fmt, ...)                                                    \
-	{                                                                      \
-	}                                                                      \
-	while (0)
-#endif
-
-/* Keeps stats of XDP_DROP vs XDP_PASS */
-static __always_inline void stats_action_verdict(u32 action)
-{
-	u64 *value;
-
-	if (action >= XDP_ACTION_MAX)
-		return;
-
-	// value = bpf_map_lookup_elem(&verdict_cnt, &action);
-	value = verdict_cnt.lookup(&action);
-	if (value)
-		*value += 1;
-}
+#define fmt_valid_str "Valid IPv4 packet: saddr:0x%s\n"
+#define fmt_v4_blocked_str "IPv4 not in the whitelist: saddr:%d.%d.%d.%d\n"
 
 /* Parse Ethernet layer 2, extract network layer 3 offset and protocol
  *
@@ -130,7 +94,8 @@ static __always_inline bool parse_eth(struct ethhdr *eth, void *data_end,
 	return true;
 }
 
-static __always_inline u32 parse_port(struct xdp_md *ctx, u8 proto, void *hdr)
+static __always_inline u32 parse_port(struct xdp_md *ctx, u8 proto, void *hdr,
+				      u32 ip_src)
 {
 	void *data_end = (void *)(long)ctx->data_end;
 	struct udphdr *udph;
@@ -140,69 +105,25 @@ static __always_inline u32 parse_port(struct xdp_md *ctx, u8 proto, void *hdr)
 	u32 dport;
 	u32 dport_idx;
 	u32 fproto;
+	u64 zero = 0, *val;
 
-	switch (proto) {
-	case IPPROTO_UDP:
-		udph = hdr;
-		if (udph + 1 > data_end) {
-			return XDP_ABORTED;
-		}
-		dport = ntohs(udph->dest);
-		fproto = DDOS_FILTER_UDP;
-		break;
-	case IPPROTO_TCP:
+	if (proto == IPPROTO_TCP) {
 		tcph = hdr;
 		if (tcph + 1 > data_end) {
 			return XDP_ABORTED;
 		}
 		dport = ntohs(tcph->dest);
-		fproto = DDOS_FILTER_TCP;
-		break;
-	case IPPROTO_ICMP:
-		return XDP_PASS;
-	default:
-		return XDP_PASS;
-	}
-
-	dport_idx = dport;
-	value = port_blacklist.lookup(&dport_idx);
-
-	if (value) {
-		if (*value & (1 << fproto)) {
-			switch (fproto) {
-			case DDOS_FILTER_UDP: {
-				drops = port_blacklist_drop_count_udp.lookup(
-				    &dport_idx);
-				break; // will never reach
+		if (dport == 80 || dport == 443) {
+			val = ipv4_blocked.lookup_or_init(&ip_src, &zero);
+			if (val) {
+				*val += 1;
 			}
-			case DDOS_FILTER_TCP: {
-				drops = port_blacklist_drop_count_tcp.lookup(
-				    &dport_idx);
-				break; // will never reach
-			}
-			default: {
-				if (drops) {
-					*drops += 1; /* Keep a counter for drop
-							matches */
-					return XDP_DROP;
-				}
-				break;
-			}
-			}
+			return XDP_DROP;
 		}
 	}
+
 	return XDP_PASS;
 }
-
-static __always_inline int ipv4_match(__be32 addr, __be32 net, u8 prefixlen)
-{
-	if (prefixlen == 0)
-		return 1;
-	return !((addr ^ net) & htonl(~0UL << (32 - prefixlen)));
-}
-
-#define fmt_valid_str "Valid IPv4 packet: raw saddr:0x%x\n"
-#define fmt_blocked_str "IPv4 packet not in the whitelist: raw saddr:0x%x, value: %d\n"
 
 static __always_inline u32 parse_ipv4(struct xdp_md *ctx, u64 l3_offset)
 {
@@ -219,15 +140,11 @@ static __always_inline u32 parse_ipv4(struct xdp_md *ctx, u64 l3_offset)
 	/* Extract key */
 	ip_src = iph->saddr;
 
-#ifdef DEBUG
-	bpf_trace_printk(fmt_valid_str, ip_src);
-#endif
-	// value = bpf_map_lookup_elem(&blacklist, &ip_src);
 	struct ipv4_lpm_key key = {.prefixlen = 32, .data = ip_src};
-	value = whitelist.lookup(&key);
+	value = ipv4_whitelist.lookup(&key);
 	if (value == NULL) { // not in the whitelist
-		bpf_trace_printk(fmt_blocked_str, ip_src, *value);
-		return XDP_DROP;
+		// check if is headed to 80/443
+		return parse_port(ctx, iph->protocol, iph + 1, ip_src);
 	}
 
 	// return parse_port(ctx, iph->protocol, iph + 1);
@@ -299,6 +216,5 @@ int xdp_ip_blocker(struct xdp_md *ctx)
 	}
 
 	action = handle_eth_protocol(ctx, eth_proto, l3_offset);
-	stats_action_verdict(action);
 	return action;
 }
